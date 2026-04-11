@@ -26,8 +26,8 @@
 
 /* ═══════════════════════════════════════════════
  *  CrowPanel ADVANCE 7.0" IPS display driver (LovyanGFX)
- *  Pin mapping from official Elecrow V1.3 source
- *  Driver IC: SC7277 (SPI+RGB hybrid)
+ *  Pin mapping & timing from official Elecrow V1.3 source
+ *  Driver IC: SC7277 (pure RGB, no SPI init needed)
  *  Backlight: STC8H1K28 MCU at I2C 0x30
  * ═══════════════════════════════════════════════ */
 
@@ -48,9 +48,9 @@ public:
             cfg.offset_y = 0;
             _panel_instance.config(cfg);
         }
-        {   /* PSRAM for framebuffer */
+        {
             auto cfg = _panel_instance.config_detail();
-            cfg.use_psram = 1;
+            cfg.use_psram = 1;   /* official Elecrow value */
             _panel_instance.config_detail(cfg);
         }
         {
@@ -80,19 +80,17 @@ public:
             cfg.pin_vsync   = GPIO_NUM_41;
             cfg.pin_hsync   = GPIO_NUM_40;
             cfg.pin_pclk    = GPIO_NUM_39;
-            cfg.freq_write  = 14000000;   /* 14 MHz — reduces PSRAM bandwidth
-                                              demand from ~42 to ~28 MB/s, leaving
-                                              headroom for CPU/LVGL accesses */
+            cfg.freq_write  = 14000000;   /* 14 MHz: stable on esp32 2.0.14 */
 
             cfg.hsync_polarity    = 0;
-            cfg.hsync_front_porch = 40;   /* wider blanking = more PSRAM-free time */
+            cfg.hsync_front_porch = 8;    /* official: 8 */
             cfg.hsync_pulse_width = 4;
-            cfg.hsync_back_porch  = 40;
+            cfg.hsync_back_porch  = 8;    /* official: 8 */
 
             cfg.vsync_polarity    = 0;
-            cfg.vsync_front_porch = 16;
+            cfg.vsync_front_porch = 8;    /* official: 8 */
             cfg.vsync_pulse_width = 4;
-            cfg.vsync_back_porch  = 16;
+            cfg.vsync_back_porch  = 8;    /* official: 8 */
 
             cfg.pclk_idle_high    = 1;
 
@@ -222,9 +220,7 @@ static lv_obj_t *make_pill_btn(lv_obj_t *parent, const char *txt,
     lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(btn, 15, 0);
     lv_obj_set_style_border_width(btn, 0, 0);
-    lv_obj_set_style_shadow_width(btn, 20, 0);
-    lv_obj_set_style_shadow_color(btn, lv_color_hex(bg), 0);
-    lv_obj_set_style_shadow_opa(btn, LV_OPA_40, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
     lv_obj_set_style_bg_color(btn, lv_color_lighten(lv_color_hex(bg), 40),
                               LV_STATE_PRESSED);
     lv_obj_t *lbl = lv_label_create(btn);
@@ -247,7 +243,10 @@ static void return_home_timer_cb(lv_timer_t *t) {
 static void create_response_screen(bool approved) {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *icon = lv_label_create(scr);
     lv_label_set_text(icon, approved ? LV_SYMBOL_OK : LV_SYMBOL_CLOSE);
@@ -269,7 +268,7 @@ static void create_response_screen(bool approved) {
     lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, 0);
     lv_obj_align(sub, LV_ALIGN_CENTER, 0, 50);
 
-    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, true);
+    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
     lv_timer_create(return_home_timer_cb, 4000, NULL);
 }
 
@@ -288,7 +287,10 @@ static void create_waiting_screen(const char *person, int urgency,
                                    const char *reason) {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *spinner = lv_spinner_create(scr);
     lv_spinner_set_anim_params(spinner, 1000, 270);
@@ -311,7 +313,7 @@ static void create_waiting_screen(const char *person, int urgency,
     lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(detail, LV_ALIGN_CENTER, 0, 60);
 
-    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, true);
+    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
 
     /* Send the UDP request */
     send_request(person, urgency, reason);
@@ -365,7 +367,10 @@ static void create_details_screen(const char *person) {
 
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     /* Back */
     lv_obj_t *back = lv_btn_create(scr);
@@ -407,6 +412,7 @@ static void create_details_screen(const char *person) {
     lv_obj_set_flex_align(urg_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(urg_row, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(urg_row, LV_OBJ_FLAG_SCROLLABLE);
 
     static const char *urg_labels[] = {"1 - Low", "2 - Med", "3 - High"};
     for (int i = 0; i < 3; i++) {
@@ -437,6 +443,7 @@ static void create_details_screen(const char *person) {
     lv_obj_set_flex_align(rsn_row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scrollbar_mode(rsn_row, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(rsn_row, LV_OBJ_FLAG_SCROLLABLE);
 
     static const char *reasons[]       = {"Dinner", "Help", "Entry", "Other"};
     static const char *reason_icons[]  = {LV_SYMBOL_HOME, LV_SYMBOL_CALL,
@@ -452,7 +459,7 @@ static void create_details_screen(const char *person) {
                             (void *)reasons[i]);
     }
 
-    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_MOVE_LEFT, 300, 0, true);
+    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
 }
 
 /* ════════════════════════════════════════════════
@@ -467,7 +474,10 @@ static void person_click_cb(lv_event_t *e) {
 static void create_home_screen(void) {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *header = lv_label_create(scr);
     lv_label_set_text(header, "Who's visiting?");
@@ -487,18 +497,25 @@ static void create_home_screen(void) {
     lv_obj_align(wifi_dot, LV_ALIGN_TOP_RIGHT, -20, 20);
     lv_obj_set_style_radius(wifi_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(wifi_dot, 0, 0);
+    lv_obj_set_style_pad_all(wifi_dot, 0, 0);
+    lv_obj_set_scrollbar_mode(wifi_dot, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(wifi_dot, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(wifi_dot,
         lv_color_hex(WiFi.status() == WL_CONNECTED ? 0x27AE60 : 0xE74C3C), 0);
 
     lv_obj_t *cont = lv_obj_create(scr);
     lv_obj_set_size(cont, 700, 280);
     lv_obj_align(cont, LV_ALIGN_CENTER, 0, 30);
-    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(cont, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, 0, 0);
     lv_obj_set_style_pad_column(cont, 40, 0);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_clear_flag(cont, LV_OBJ_FLAG_SCROLLABLE);
 
     static const uint32_t colors[] = {0x055E5C, 0x0A8F8D, 0x13C7C3};
     static const char *names[]     = {"Mom", "Dad", "Mason"};
@@ -512,17 +529,12 @@ static void create_home_screen(void) {
         lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(card, 20, 0);
         lv_obj_set_style_border_width(card, 0, 0);
-        lv_obj_set_style_shadow_width(card, 30, 0);
-        lv_obj_set_style_shadow_color(card, lv_color_hex(colors[i]), 0);
-        lv_obj_set_style_shadow_opa(card, LV_OPA_50, 0);
+        lv_obj_set_style_shadow_width(card, 0, 0);
         lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                               LV_FLEX_ALIGN_CENTER);
         lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_set_style_bg_color(card,
-            lv_color_lighten(lv_color_hex(colors[i]), 40), LV_STATE_PRESSED);
-        lv_obj_set_style_transform_width(card, -5, LV_STATE_PRESSED);
-        lv_obj_set_style_transform_height(card, -5, LV_STATE_PRESSED);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(card, person_click_cb, LV_EVENT_CLICKED,
                             (void *)names[i]);
@@ -538,7 +550,7 @@ static void create_home_screen(void) {
         lv_obj_set_style_text_font(nm, &lv_font_montserrat_24, 0);
     }
 
-    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, true);
+    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_NONE, 0, 0, true);
 }
 
 /* ════════════════════════════════════════════════
@@ -549,7 +561,7 @@ static void my_disp_flush(lv_display_t *disp, const lv_area_t *area,
                            uint8_t *px_map) {
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
-    lcd.pushImage(area->x1, area->y1, w, h, (uint16_t *)px_map);
+    lcd.pushImage(area->x1, area->y1, w, h, (lgfx::rgb565_t *)px_map);
     lv_display_flush_ready(disp);
 }
 
@@ -602,8 +614,7 @@ void setup() {
     stc_send_cmd(0);
     Serial.println("[OK] Backlight ON (max brightness)");
 
-    /* Display hardware — no DMA/startWrite needed;
-       Panel_RGB has its own continuous DMA from the PSRAM framebuffer */
+    /* Display hardware */
     lcd.init();
     lcd.fillScreen(TFT_BLACK);
     Serial.println("[OK] LCD init done");
@@ -619,19 +630,20 @@ void setup() {
     lv_tick_set_cb(my_tick_get);
 
     /* Display (800×480, 16-bit color)
-       Double buffers in INTERNAL SRAM — critical for avoiding PSRAM
-       bandwidth contention with the RGB peripheral's continuous DMA.
-       75 KB × 2 fits in internal SRAM; LVGL renders here then pushImage
-       copies to the panel's PSRAM framebuffer in a short burst. */
+       Internal SRAM draw buffers avoid PSRAM bus contention with
+       the LCD DMA that continuously reads the panel framebuffer.
+       Copy path: SRAM draw buf → PSRAM panel FB (pushImage). */
     static lv_display_t *disp = lv_display_create(800, 480);
-    static const size_t buf_size = 800 * 48 * sizeof(uint16_t);   /* ~75 KB */
-    static uint16_t *buf1 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
-    static uint16_t *buf2 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    static const size_t buf_lines = 48;   /* 800×48×2 = 76 800 bytes */
+    static const size_t buf_size  = 800 * buf_lines * sizeof(lv_color16_t);
+    static void *buf1 = heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL);
+    static void *buf2 = heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL);
     if (!buf1 || !buf2) {
-        Serial.println("[ERR] Internal SRAM alloc failed, falling back to PSRAM");
-        if (!buf1) buf1 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-        if (!buf2) buf2 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        Serial.printf("[FATAL] SRAM alloc failed: buf1=%p buf2=%p\n", buf1, buf2);
+        while (1) delay(1000);
     }
+    Serial.printf("[OK] LVGL buffers: buf1=%p buf2=%p (%u bytes each, internal SRAM)\n",
+                  buf1, buf2, (unsigned)buf_size);
     lv_display_set_buffers(disp, buf1, buf2, buf_size,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, my_disp_flush);
@@ -651,5 +663,5 @@ void setup() {
 
 void loop() {
     lv_timer_handler();
-    delay(5);
+    delay(1);
 }
