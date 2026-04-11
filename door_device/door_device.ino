@@ -1,17 +1,142 @@
 /*  door_device.ino
  *  ────────────────
- *  ESP32 + 7" capacitive touch (800×480) on the bedroom door.
+ *  ESP32 + CrowPanel ADVANCE 7" IPS (800×480) V1.3 on the bedroom door.
  *  Connects to WiFi, sends UDP requests to the controller,
  *  listens for approve/deny responses.
  *
- *  Board:  ESP32-S3 (or whichever your 7" screen uses)
- *  Library deps:  lvgl, LovyanGFX (or your display driver), WiFi
+ *  Board:  ESP32S3 Dev Module
+ *  Arduino IDE Settings:
+ *    Flash Size: 16MB (128Mb)        ← Advance has 16MB flash!
+ *    PSRAM: OPI PSRAM
+ *    Partition Scheme: Default 4MB with spiffs (or 16MB)
+ *    USB CDC On Boot: Disabled
+ *  Library deps:  lvgl 9.x, LovyanGFX 1.1.16, WiFi
  */
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <lvgl.h>
+#define LGFX_USE_V1
+#include <LovyanGFX.hpp>
+#include <lgfx/v1/platforms/esp32s3/Panel_RGB.hpp>
+#include <lgfx/v1/platforms/esp32s3/Bus_RGB.hpp>
+#include <driver/i2c.h>
+#include <Wire.h>
 #include "protocol.h"   /* shared header one level up */
+
+/* ═══════════════════════════════════════════════
+ *  CrowPanel ADVANCE 7.0" IPS display driver (LovyanGFX)
+ *  Pin mapping from official Elecrow V1.3 source
+ *  Driver IC: SC7277 (SPI+RGB hybrid)
+ *  Backlight: STC8H1K28 MCU at I2C 0x30
+ * ═══════════════════════════════════════════════ */
+
+class LGFX : public lgfx::LGFX_Device {
+public:
+    lgfx::Bus_RGB      _bus_instance;
+    lgfx::Panel_RGB    _panel_instance;
+    lgfx::Touch_GT911  _touch_instance;
+
+    LGFX(void) {
+        {
+            auto cfg = _panel_instance.config();
+            cfg.memory_width  = 800;
+            cfg.memory_height = 480;
+            cfg.panel_width   = 800;
+            cfg.panel_height  = 480;
+            cfg.offset_x = 0;
+            cfg.offset_y = 0;
+            _panel_instance.config(cfg);
+        }
+        {   /* PSRAM for framebuffer */
+            auto cfg = _panel_instance.config_detail();
+            cfg.use_psram = 1;
+            _panel_instance.config_detail(cfg);
+        }
+        {
+            auto cfg = _bus_instance.config();
+            cfg.panel = &_panel_instance;
+
+            cfg.pin_d0  = GPIO_NUM_21;   // B0
+            cfg.pin_d1  = GPIO_NUM_47;   // B1
+            cfg.pin_d2  = GPIO_NUM_48;   // B2
+            cfg.pin_d3  = GPIO_NUM_45;   // B3
+            cfg.pin_d4  = GPIO_NUM_38;   // B4
+
+            cfg.pin_d5  = GPIO_NUM_9;    // G0
+            cfg.pin_d6  = GPIO_NUM_10;   // G1
+            cfg.pin_d7  = GPIO_NUM_11;   // G2
+            cfg.pin_d8  = GPIO_NUM_12;   // G3
+            cfg.pin_d9  = GPIO_NUM_13;   // G4
+            cfg.pin_d10 = GPIO_NUM_14;   // G5
+
+            cfg.pin_d11 = GPIO_NUM_7;    // R0
+            cfg.pin_d12 = GPIO_NUM_17;   // R1
+            cfg.pin_d13 = GPIO_NUM_18;   // R2
+            cfg.pin_d14 = GPIO_NUM_3;    // R3
+            cfg.pin_d15 = GPIO_NUM_46;   // R4
+
+            cfg.pin_henable = GPIO_NUM_42;
+            cfg.pin_vsync   = GPIO_NUM_41;
+            cfg.pin_hsync   = GPIO_NUM_40;
+            cfg.pin_pclk    = GPIO_NUM_39;
+            cfg.freq_write  = 14000000;   /* 14 MHz — reduces PSRAM bandwidth
+                                              demand from ~42 to ~28 MB/s, leaving
+                                              headroom for CPU/LVGL accesses */
+
+            cfg.hsync_polarity    = 0;
+            cfg.hsync_front_porch = 40;   /* wider blanking = more PSRAM-free time */
+            cfg.hsync_pulse_width = 4;
+            cfg.hsync_back_porch  = 40;
+
+            cfg.vsync_polarity    = 0;
+            cfg.vsync_front_porch = 16;
+            cfg.vsync_pulse_width = 4;
+            cfg.vsync_back_porch  = 16;
+
+            cfg.pclk_idle_high    = 1;
+
+            _bus_instance.config(cfg);
+            _panel_instance.setBus(&_bus_instance);
+        }
+        /* No Light_PWM — backlight is controlled via STC8H1K28 I2C MCU */
+        {
+            auto cfg = _touch_instance.config();
+            cfg.x_min      = 0;
+            cfg.x_max      = 800;
+            cfg.y_min      = 0;
+            cfg.y_max      = 480;
+            cfg.pin_int    = -1;
+            cfg.pin_rst    = -1;
+            cfg.bus_shared = false;
+            cfg.offset_rotation = 0;
+            cfg.i2c_port   = I2C_NUM_0;
+            cfg.pin_sda    = GPIO_NUM_15;
+            cfg.pin_scl    = GPIO_NUM_16;
+            cfg.freq       = 400000;
+            cfg.i2c_addr   = 0x5D;
+            _touch_instance.config(cfg);
+            _panel_instance.setTouch(&_touch_instance);
+        }
+        setPanel(&_panel_instance);
+    }
+};
+
+static LGFX lcd;
+
+/* ─── STC8H1K28 backlight/touch controller at I2C 0x30 ─── */
+#define STC_ADDR  0x30
+
+static void stc_send_cmd(uint8_t cmd) {
+    Wire.beginTransmission(STC_ADDR);
+    Wire.write(cmd);
+    Wire.endTransmission();
+}
+
+static bool i2c_device_present(uint8_t addr) {
+    Wire.beginTransmission(addr);
+    return (Wire.endTransmission() == 0);
+}
 
 /* ─── Networking ─── */
 static WiFiUDP udp;
@@ -121,7 +246,7 @@ static void return_home_timer_cb(lv_timer_t *t) {
 
 static void create_response_screen(bool approved) {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *icon = lv_label_create(scr);
@@ -140,7 +265,7 @@ static void create_response_screen(bool approved) {
     lv_obj_t *sub = lv_label_create(scr);
     lv_label_set_text(sub, approved ? "The door has been unlocked"
                                      : "Please try again later");
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x7A7A7A), 0);
     lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, 0);
     lv_obj_align(sub, LV_ALIGN_CENTER, 0, 50);
 
@@ -162,7 +287,7 @@ static void timeout_cb(lv_timer_t *t) {
 static void create_waiting_screen(const char *person, int urgency,
                                    const char *reason) {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *spinner = lv_spinner_create(scr);
@@ -181,7 +306,7 @@ static void create_waiting_screen(const char *person, int urgency,
     snprintf(buf, sizeof(buf), "%s  |  Urgency: %d  |  %s",
              person, urgency, reason);
     lv_label_set_text(detail, buf);
-    lv_obj_set_style_text_color(detail, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_color(detail, lv_color_hex(0x7A7A7A), 0);
     lv_obj_set_style_text_font(detail, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(detail, LV_ALIGN_CENTER, 0, 60);
@@ -204,7 +329,7 @@ static const uint32_t urgency_colors[] = {0x27AE60, 0xF39C12, 0xE74C3C};
 static void urgency_click_cb(lv_event_t *e) {
     int level = (int)(intptr_t)lv_event_get_user_data(e);
     selected_urgency = level;
-    lv_obj_t *cont = lv_obj_get_parent(lv_event_get_target(e));
+    lv_obj_t *cont = lv_obj_get_parent((lv_obj_t *)lv_event_get_target(e));
     uint32_t cnt = lv_obj_get_child_count(cont);
     for (uint32_t i = 0; i < cnt; i++) {
         lv_obj_t *child = lv_obj_get_child(cont, i);
@@ -239,14 +364,14 @@ static void create_details_screen(const char *person) {
     selected_urgency = 0;
 
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     /* Back */
     lv_obj_t *back = lv_btn_create(scr);
     lv_obj_set_size(back, 80, 36);
     lv_obj_align(back, LV_ALIGN_TOP_LEFT, 15, 10);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x333355), 0);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x0A0A0A), 0);
     lv_obj_set_style_radius(back, 10, 0);
     lv_obj_set_style_border_width(back, 0, 0);
     lv_obj_add_event_cb(back, back_click_cb, LV_EVENT_CLICKED, NULL);
@@ -341,7 +466,7 @@ static void person_click_cb(lv_event_t *e) {
 
 static void create_home_screen(void) {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *header = lv_label_create(scr);
@@ -352,7 +477,7 @@ static void create_home_screen(void) {
 
     lv_obj_t *sub = lv_label_create(scr);
     lv_label_set_text(sub, "Please select your name");
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x7A7A7A), 0);
     lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, 0);
     lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 80);
 
@@ -375,7 +500,7 @@ static void create_home_screen(void) {
     lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    static const uint32_t colors[] = {0x0F3460, 0x533483, 0xE94560};
+    static const uint32_t colors[] = {0x055E5C, 0x0A8F8D, 0x13C7C3};
     static const char *names[]     = {"Mom", "Dad", "Mason"};
     static const char *icons[]     = {LV_SYMBOL_HOME, LV_SYMBOL_SETTINGS,
                                       LV_SYMBOL_AUDIO};
@@ -418,28 +543,25 @@ static void create_home_screen(void) {
 
 /* ════════════════════════════════════════════════
  *  Arduino setup() / loop()
- * ════════════════════════════════════════════════
- *
- *  ⚠  YOU MUST add your display & touch driver init here.
- *     This depends on your specific 7" screen hardware.
- *     Typically: LovyanGFX, TFT_eSPI, or the vendor's driver.
- */
+ * ════════════════════════════════════════════════ */
 
-/* ── Display driver flush callback (REPLACE with your driver) ── */
 static void my_disp_flush(lv_display_t *disp, const lv_area_t *area,
                            uint8_t *px_map) {
-    /* TODO: push pixels to your display hardware here */
+    uint32_t w = (area->x2 - area->x1 + 1);
+    uint32_t h = (area->y2 - area->y1 + 1);
+    lcd.pushImage(area->x1, area->y1, w, h, (uint16_t *)px_map);
     lv_display_flush_ready(disp);
 }
 
-/* ── Touch driver read callback (REPLACE with your driver) ── */
 static void my_touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
-    /* TODO: read touch from your hardware
-       data->point.x = touch_x;
-       data->point.y = touch_y;
-       data->state   = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
-    */
-    data->state = LV_INDEV_STATE_RELEASED;
+    uint16_t tx, ty;
+    if (lcd.getTouch(&tx, &ty)) {
+        data->point.x = tx;
+        data->point.y = ty;
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
 }
 
 static uint32_t my_tick_get(void) {
@@ -448,21 +570,69 @@ static uint32_t my_tick_get(void) {
 
 void setup() {
     Serial.begin(115200);
+    delay(500);
+    Serial.println("\n\n=== CrowPanel ADVANCE 7\" Door Device Starting (V1.3) ===");
 
-    /* ── WiFi ── */
+    /* GPIO19 is SPI CS on the Advance board — set as output */
+    pinMode(19, OUTPUT);
+
+    /* I2C bus for STC8H1K28 backlight controller + GT911 touch
+       SDA = GPIO15, SCL = GPIO16 on the Advance board */
+    Wire.begin(15, 16);
+    delay(50);
+
+    /* Wait for STC8H1K28 (0x30) and GT911 touch (0x5D) to come up */
+    Serial.println("[INIT] Waiting for STC8H1K28 & GT911...");
+    for (int retries = 0; retries < 20; retries++) {
+        if (i2c_device_present(STC_ADDR) && i2c_device_present(0x5D)) {
+            Serial.println("[OK] STC8H1K28 (0x30) and GT911 (0x5D) detected");
+            break;
+        }
+        /* Touch controller not responding — reset it via GPIO1 */
+        stc_send_cmd(250);      /* activate touch screen */
+        pinMode(1, OUTPUT);
+        digitalWrite(1, LOW);
+        delay(120);
+        pinMode(1, INPUT);
+        delay(100);
+        Serial.printf("[INIT] Retry %d...\n", retries + 1);
+    }
+
+    /* Turn on backlight: 0 = max brightness, 245 = off */
+    stc_send_cmd(0);
+    Serial.println("[OK] Backlight ON (max brightness)");
+
+    /* Display hardware — no DMA/startWrite needed;
+       Panel_RGB has its own continuous DMA from the PSRAM framebuffer */
+    lcd.init();
+    lcd.fillScreen(TFT_BLACK);
+    Serial.println("[OK] LCD init done");
+
+    /* WiFi */
     wifi_connect();
 
-    /* ── UDP listener ── */
+    /* UDP listener */
     udp.begin(COMM_PORT);
 
-    /* ── LVGL init ── */
+    /* LVGL init */
     lv_init();
     lv_tick_set_cb(my_tick_get);
 
-    /* Display  (800×480, 16-bit color) */
+    /* Display (800×480, 16-bit color)
+       Double buffers in INTERNAL SRAM — critical for avoiding PSRAM
+       bandwidth contention with the RGB peripheral's continuous DMA.
+       75 KB × 2 fits in internal SRAM; LVGL renders here then pushImage
+       copies to the panel's PSRAM framebuffer in a short burst. */
     static lv_display_t *disp = lv_display_create(800, 480);
-    static uint8_t buf[800 * 40 * 2]; /* draw buffer: 40 rows */
-    lv_display_set_buffers(disp, buf, NULL, sizeof(buf),
+    static const size_t buf_size = 800 * 48 * sizeof(uint16_t);   /* ~75 KB */
+    static uint16_t *buf1 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    static uint16_t *buf2 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+    if (!buf1 || !buf2) {
+        Serial.println("[ERR] Internal SRAM alloc failed, falling back to PSRAM");
+        if (!buf1) buf1 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        if (!buf2) buf2 = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    }
+    lv_display_set_buffers(disp, buf1, buf2, buf_size,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, my_disp_flush);
 
@@ -471,11 +641,12 @@ void setup() {
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touch_read);
 
-    /* ── Poll for incoming UDP packets every 100 ms ── */
+    /* Poll for incoming UDP packets every 100 ms */
     lv_timer_create(check_incoming, 100, NULL);
 
-    /* ── Show home screen ── */
+    /* Show home screen */
     create_home_screen();
+    Serial.println("[OK] Door device ready");
 }
 
 void loop() {

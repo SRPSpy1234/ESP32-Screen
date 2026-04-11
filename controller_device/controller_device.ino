@@ -11,7 +11,124 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <lvgl.h>
+#define LGFX_USE_V1
+#include <LovyanGFX.hpp>
+#include <lgfx/v1/platforms/esp32s3/Panel_RGB.hpp>
+#include <lgfx/v1/platforms/esp32s3/Bus_RGB.hpp>
+#include <driver/i2c.h>
+#include <Wire.h>
 #include "protocol.h"   /* shared header one level up */
+
+/* ═══════════════════════════════════════════════
+ *  CrowPanel 5.0" display driver (LovyanGFX)
+ *  Pin mapping & timing from Elecrow official code
+ * ═══════════════════════════════════════════════ */
+
+class LGFX : public lgfx::LGFX_Device {
+public:
+    lgfx::Bus_RGB      _bus_instance;
+    lgfx::Panel_RGB    _panel_instance;
+    lgfx::Light_PWM    _light_instance;
+    lgfx::Touch_GT911  _touch_instance;
+
+    LGFX(void) {
+        {
+            auto cfg = _panel_instance.config();
+            cfg.memory_width  = 800;
+            cfg.memory_height = 480;
+            cfg.panel_width   = 800;
+            cfg.panel_height  = 480;
+            cfg.offset_x = 0;
+            cfg.offset_y = 0;
+            _panel_instance.config(cfg);
+        }
+        {
+            auto cfg = _bus_instance.config();
+            cfg.panel = &_panel_instance;
+
+            cfg.pin_d0  = GPIO_NUM_8;   // B0
+            cfg.pin_d1  = GPIO_NUM_3;   // B1
+            cfg.pin_d2  = GPIO_NUM_46;  // B2
+            cfg.pin_d3  = GPIO_NUM_9;   // B3
+            cfg.pin_d4  = GPIO_NUM_1;   // B4
+
+            cfg.pin_d5  = GPIO_NUM_5;   // G0
+            cfg.pin_d6  = GPIO_NUM_6;   // G1
+            cfg.pin_d7  = GPIO_NUM_7;   // G2
+            cfg.pin_d8  = GPIO_NUM_15;  // G3
+            cfg.pin_d9  = GPIO_NUM_16;  // G4
+            cfg.pin_d10 = GPIO_NUM_4;   // G5
+
+            cfg.pin_d11 = GPIO_NUM_45;  // R0
+            cfg.pin_d12 = GPIO_NUM_48;  // R1
+            cfg.pin_d13 = GPIO_NUM_47;  // R2
+            cfg.pin_d14 = GPIO_NUM_21;  // R3
+            cfg.pin_d15 = GPIO_NUM_14;  // R4
+
+            cfg.pin_henable = GPIO_NUM_40;
+            cfg.pin_vsync   = GPIO_NUM_41;
+            cfg.pin_hsync   = GPIO_NUM_39;
+            cfg.pin_pclk    = GPIO_NUM_0;
+            cfg.freq_write  = 12000000;
+
+            cfg.hsync_polarity    = 0;
+            cfg.hsync_front_porch = 8;
+            cfg.hsync_pulse_width = 4;
+            cfg.hsync_back_porch  = 43;
+
+            cfg.vsync_polarity    = 0;
+            cfg.vsync_front_porch = 8;
+            cfg.vsync_pulse_width = 4;
+            cfg.vsync_back_porch  = 12;
+
+            cfg.pclk_active_neg   = 0;
+            cfg.de_idle_high      = 0;
+            cfg.pclk_idle_high    = 0;
+
+            _bus_instance.config(cfg);
+            _panel_instance.setBus(&_bus_instance);
+        }
+        {
+            auto cfg = _light_instance.config();
+            cfg.pin_bl = GPIO_NUM_2;
+            _light_instance.config(cfg);
+            _panel_instance.light(&_light_instance);
+        }
+        {
+            auto cfg = _touch_instance.config();
+            cfg.x_min      = 0;
+            cfg.x_max      = 799;
+            cfg.y_min      = 0;
+            cfg.y_max      = 479;
+            cfg.pin_int    = -1;
+            cfg.pin_rst    = -1;
+            cfg.bus_shared = true;
+            cfg.offset_rotation = 0;
+            cfg.i2c_port   = I2C_NUM_1;
+            cfg.pin_sda    = GPIO_NUM_19;
+            cfg.pin_scl    = GPIO_NUM_20;
+            cfg.freq       = 400000;
+            cfg.i2c_addr   = 0x14;
+            _touch_instance.config(cfg);
+            _panel_instance.setTouch(&_touch_instance);
+        }
+        setPanel(&_panel_instance);
+    }
+};
+
+static LGFX lcd;
+
+/* ─── PCA9557 I/O expander (display reset/enable on V3.0 boards) ─── */
+#define PCA9557_ADDR       0x18
+#define PCA9557_OUTPUT_REG 0x01
+#define PCA9557_CONFIG_REG 0x03
+
+static void pca9557_write(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(PCA9557_ADDR);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
+}
 
 /* ─── Networking ─── */
 static WiFiUDP   udp;
@@ -113,7 +230,7 @@ static void return_idle_timer_cb(lv_timer_t *t) {
 
 static void create_result_screen(bool approved) {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *icon = lv_label_create(scr);
@@ -156,13 +273,13 @@ static void deny_click_cb(lv_event_t *e) {
 static void create_request_screen(const char *person, int urgency,
                                    const char *reason) {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     /* Bell */
     lv_obj_t *bell = lv_label_create(scr);
     lv_label_set_text(bell, LV_SYMBOL_BELL);
-    lv_obj_set_style_text_color(bell, lv_color_hex(0xF39C12), 0);
+    lv_obj_set_style_text_color(bell, lv_color_hex(0x13F0EC), 0);
     lv_obj_set_style_text_font(bell, &lv_font_montserrat_36, 0);
     lv_obj_align(bell, LV_ALIGN_TOP_MID, 0, 20);
 
@@ -179,7 +296,7 @@ static void create_request_screen(const char *person, int urgency,
     lv_obj_t *info_row = lv_obj_create(scr);
     lv_obj_set_size(info_row, 600, 70);
     lv_obj_align(info_row, LV_ALIGN_TOP_MID, 0, 115);
-    lv_obj_set_style_bg_color(info_row, lv_color_hex(0x252545), 0);
+    lv_obj_set_style_bg_color(info_row, lv_color_hex(0x0A0A0A), 0);
     lv_obj_set_style_bg_opa(info_row, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(info_row, 12, 0);
     lv_obj_set_style_border_width(info_row, 0, 0);
@@ -213,7 +330,7 @@ static void create_request_screen(const char *person, int urgency,
     /* Reason badge */
     lv_obj_t *rsn_badge = lv_obj_create(info_row);
     lv_obj_set_size(rsn_badge, 160, 40);
-    lv_obj_set_style_bg_color(rsn_badge, lv_color_hex(0x2980B9), 0);
+    lv_obj_set_style_bg_color(rsn_badge, lv_color_hex(0x0E8E8B), 0);
     lv_obj_set_style_bg_opa(rsn_badge, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(rsn_badge, 10, 0);
     lv_obj_set_style_border_width(rsn_badge, 0, 0);
@@ -255,24 +372,24 @@ static void create_request_screen(const char *person, int urgency,
 
 static void create_idle_screen(void) {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     lv_obj_t *icon = lv_label_create(scr);
     lv_label_set_text(icon, LV_SYMBOL_HOME);
-    lv_obj_set_style_text_color(icon, lv_color_hex(0x444466), 0);
+    lv_obj_set_style_text_color(icon, lv_color_hex(0x13F0EC), 0);
     lv_obj_set_style_text_font(icon, &lv_font_montserrat_48, 0);
     lv_obj_align(icon, LV_ALIGN_CENTER, 0, -60);
 
     lv_obj_t *status = lv_label_create(scr);
     lv_label_set_text(status, "No visitors right now");
-    lv_obj_set_style_text_color(status, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_color(status, lv_color_hex(0x7A7A7A), 0);
     lv_obj_set_style_text_font(status, &lv_font_montserrat_22, 0);
     lv_obj_align(status, LV_ALIGN_CENTER, 0, 10);
 
     lv_obj_t *sub = lv_label_create(scr);
     lv_label_set_text(sub, "You'll be notified when someone is at the door");
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x4A4A4A), 0);
     lv_obj_set_style_text_font(sub, &lv_font_montserrat_16, 0);
     lv_obj_align(sub, LV_ALIGN_CENTER, 0, 45);
 
@@ -298,13 +415,21 @@ static void create_idle_screen(void) {
 
 static void my_disp_flush(lv_display_t *disp, const lv_area_t *area,
                            uint8_t *px_map) {
-    /* TODO: push pixels to your 5" display hardware */
+    uint32_t w = (area->x2 - area->x1 + 1);
+    uint32_t h = (area->y2 - area->y1 + 1);
+    lcd.pushImage(area->x1, area->y1, w, h, (uint16_t *)px_map);
     lv_display_flush_ready(disp);
 }
 
 static void my_touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
-    /* TODO: read touch from your hardware */
-    data->state = LV_INDEV_STATE_RELEASED;
+    uint16_t tx, ty;
+    if (lcd.getTouch(&tx, &ty)) {
+        data->point.x = tx;
+        data->point.y = ty;
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
 }
 
 static uint32_t my_tick_get(void) {
@@ -313,6 +438,25 @@ static uint32_t my_tick_get(void) {
 
 void setup() {
     Serial.begin(115200);
+    delay(500);
+    Serial.println("\n\n=== CrowPanel Controller Starting ===");
+
+    /* PCA9557 I/O expander init (required for CrowPanel V3.0 boards)
+     * Controls display reset/enable signals via I2C GPIO expander. */
+    Wire.begin(19, 20);
+    pca9557_write(PCA9557_CONFIG_REG, 0x00);  /* all pins = output */
+    pca9557_write(PCA9557_OUTPUT_REG, 0x00);  /* IO0=LOW, IO1=LOW */
+    delay(20);
+    pca9557_write(PCA9557_OUTPUT_REG, 0x01);  /* IO0=HIGH (enable display) */
+    delay(100);
+    pca9557_write(PCA9557_CONFIG_REG, 0x02);  /* IO1=input (touch IRQ) */
+    Serial.println("[OK] PCA9557 init done");
+
+    /* Display hardware (LovyanGFX — handles backlight + touch) */
+    lcd.init();
+    lcd.setRotation(0);
+    lcd.fillScreen(TFT_BLACK);
+    Serial.println("[OK] LCD init done");
 
     /* WiFi */
     wifi_connect();
